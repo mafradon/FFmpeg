@@ -62,7 +62,7 @@ const char program_name[] = "ffplay";
 const int program_birth_year = 2003;
 
 #define MAX_QUEUE_SIZE (15 * 1024 * 1024)
-#define MIN_FRAMES 25
+#define MIN_FRAMES 1
 #define EXTERNAL_CLOCK_MIN_FRAMES 2
 #define EXTERNAL_CLOCK_MAX_FRAMES 10
 
@@ -1533,34 +1533,8 @@ static void step_to_next_frame(VideoState *is)
     is->step = 1;
 }
 
-static double compute_target_delay(double delay, VideoState *is)
-{
-    double sync_threshold, diff = 0;
-
-    /* update delay to follow master synchronisation source */
-    if (get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER) {
-        /* if video is slave, we try to correct big delays by
-           duplicating or deleting a frame */
-        diff = get_clock(&is->vidclk) - get_master_clock(is);
-
-        /* skip or repeat frame. We take into account the
-           delay to compute the threshold. I still don't know
-           if it is the best guess */
-        sync_threshold = FFMAX(AV_SYNC_THRESHOLD_MIN, FFMIN(AV_SYNC_THRESHOLD_MAX, delay));
-        if (!isnan(diff) && fabs(diff) < is->max_frame_duration) {
-            if (diff <= -sync_threshold)
-                delay = FFMAX(0, delay + diff);
-            else if (diff >= sync_threshold && delay > AV_SYNC_FRAMEDUP_THRESHOLD)
-                delay = delay + diff;
-            else if (diff >= sync_threshold)
-                delay = 2 * delay;
-        }
-    }
-
-    av_log(NULL, AV_LOG_TRACE, "video: delay=%0.3f A-V=%f\n",
-            delay, -diff);
-
-    return delay;
+static double compute_target_delay(double delay, VideoState* is) {
+    return 0.0; // Always return zero delay
 }
 
 static double vp_duration(VideoState *is, Frame *vp, Frame *nextvp) {
@@ -1630,10 +1604,8 @@ retry:
             delay = compute_target_delay(last_duration, is);
 
             time= av_gettime_relative()/1000000.0;
-            if (time < is->frame_timer + delay) {
-                *remaining_time = FFMIN(is->frame_timer + delay - time, *remaining_time);
-                goto display;
-            }
+            // Always proceed to display the frame immediately
+            *remaining_time = 0.0;
 
             is->frame_timer += delay;
             if (delay > 0 && time - is->frame_timer > AV_SYNC_THRESHOLD_MAX)
@@ -1797,17 +1769,7 @@ static int get_video_frame(VideoState *is, AVFrame *frame)
         frame->sample_aspect_ratio = av_guess_sample_aspect_ratio(is->ic, is->video_st, frame);
 
         if (framedrop>0 || (framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) {
-            if (frame->pts != AV_NOPTS_VALUE) {
-                double diff = dpts - get_master_clock(is);
-                if (!isnan(diff) && fabs(diff) < AV_NOSYNC_THRESHOLD &&
-                    diff - is->frame_last_filter_delay < 0 &&
-                    is->viddec.pkt_serial == is->vidclk.serial &&
-                    is->videoq.nb_packets) {
-                    is->frame_drops_early++;
-                    av_frame_unref(frame);
-                    got_picture = 0;
-                }
-            }
+            // Do not drop frames based on PTS ordering; allow rendering
         }
     }
 
@@ -3067,16 +3029,8 @@ static int read_thread(void *arg)
         }
 
         /* if the queue are full, no need to read more */
-        if (infinite_buffer<1 &&
-              (is->audioq.size + is->videoq.size + is->subtitleq.size > MAX_QUEUE_SIZE
-            || (stream_has_enough_packets(is->audio_st, is->audio_stream, &is->audioq) &&
-                stream_has_enough_packets(is->video_st, is->video_stream, &is->videoq) &&
-                stream_has_enough_packets(is->subtitle_st, is->subtitle_stream, &is->subtitleq)))) {
-            /* wait 10 ms */
-            SDL_LockMutex(wait_mutex);
-            SDL_CondWaitTimeout(is->continue_read_thread, wait_mutex, 10);
-            SDL_UnlockMutex(wait_mutex);
-            continue;
+        if (is->realtime) {
+            infinite_buffer = 0; // Disable infinite buffering
         }
         if (!is->paused &&
             (!is->audio_st || (is->auddec.finished == is->audioq.serial && frame_queue_nb_remaining(&is->sampq) == 0)) &&
