@@ -62,7 +62,7 @@ const char program_name[] = "ffplay";
 const int program_birth_year = 2003;
 
 #define MAX_QUEUE_SIZE (15 * 1024 * 1024)
-#define MIN_FRAMES 1
+#define MIN_FRAMES 25
 #define EXTERNAL_CLOCK_MIN_FRAMES 2
 #define EXTERNAL_CLOCK_MAX_FRAMES 10
 
@@ -2721,7 +2721,7 @@ static int stream_component_open(VideoState *is, int stream_index)
     case AVMEDIA_TYPE_VIDEO:
         is->video_stream = stream_index;
         is->video_st = ic->streams[stream_index];
-
+		
         if ((ret = decoder_init(&is->viddec, avctx, &is->videoq, is->continue_read_thread)) < 0)
             goto fail;
         if ((ret = decoder_start(&is->viddec, video_thread, "video_decoder", is)) < 0)
@@ -2838,7 +2838,7 @@ static int read_thread(void *arg)
     is->ic = ic;
 
     if (genpts)
-        ic->flags |= AVFMT_FLAG_GENPTS;
+        ic->flags |= AVFMT_FLAG_GENPTS & AVFMT_FLAG_IGNDTS & AVFMT_FLAG_NONBLOCK;
 
     if (find_stream_info) {
         AVDictionary **opts;
@@ -3029,8 +3029,16 @@ static int read_thread(void *arg)
         }
 
         /* if the queue are full, no need to read more */
-        if (is->realtime) {
-            infinite_buffer = 0; // Disable infinite buffering
+        if (infinite_buffer<1 &&
+              (is->audioq.size + is->videoq.size + is->subtitleq.size > MAX_QUEUE_SIZE
+            || (stream_has_enough_packets(is->audio_st, is->audio_stream, &is->audioq) &&
+                stream_has_enough_packets(is->video_st, is->video_stream, &is->videoq) &&
+                stream_has_enough_packets(is->subtitle_st, is->subtitle_stream, &is->subtitleq)))) {
+            /* wait 10 ms */
+            SDL_LockMutex(wait_mutex);
+            SDL_CondWaitTimeout(is->continue_read_thread, wait_mutex, 10);
+            SDL_UnlockMutex(wait_mutex);
+            continue;
         }
         if (!is->paused &&
             (!is->audio_st || (is->auddec.finished == is->audioq.serial && frame_queue_nb_remaining(&is->sampq) == 0)) &&
