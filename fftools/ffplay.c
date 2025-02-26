@@ -2738,14 +2738,11 @@ static int is_realtime(AVFormatContext *s)
         return 1;
     return 0;
 }
-static void display_frame(AVFrame* frame) {
-    // Upload the frame only if needed, reusing existing logic
+static void display_frame(VideoState *is, AVFrame* frame) {
     if (upload_texture(&is->vid_texture, frame) < 0) {
         av_log(NULL, AV_LOG_ERROR, "Failed to upload texture\\n");
         return;
     }
-
-    // Render the texture immediately
     SDL_RenderClear(renderer);
     SDL_RenderCopy(renderer, is->vid_texture, NULL, NULL);
     SDL_RenderPresent(renderer);
@@ -2839,7 +2836,7 @@ static int read_thread(void* arg)
             if (frame) {
                 if (decoder_decode_frame(&is->viddec, frame, NULL) > 0) {
                     // Direct display without timing checks
-                    display_frame(frame);
+                    display_frame(is, frame);
                     av_frame_unref(frame);
                 }
                 av_frame_free(&frame);
