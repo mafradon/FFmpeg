@@ -364,7 +364,6 @@ static SDL_RendererInfo renderer_info = {0};
 static SDL_AudioDeviceID audio_dev;
 
 static VkRenderer *vk_renderer;
-extern SDL_Texture* upload_texture_direct(AVFrame* frame);
 
 static const struct TextureFormatEntry {
     enum AVPixelFormat format;
@@ -2740,13 +2739,16 @@ static int is_realtime(AVFormatContext *s)
     return 0;
 }
 static void display_frame(AVFrame* frame) {
-    SDL_Texture* texture = upload_texture_direct(frame);
-    if (texture) {
-        SDL_RenderClear(renderer);
-        SDL_RenderCopy(renderer, texture, NULL, NULL);
-        SDL_RenderPresent(renderer);
-        SDL_DestroyTexture(texture);
+    // Upload the frame only if needed, reusing existing logic
+    if (upload_texture(&is->vid_texture, frame) < 0) {
+        av_log(NULL, AV_LOG_ERROR, "Failed to upload texture\\n");
+        return;
     }
+
+    // Render the texture immediately
+    SDL_RenderClear(renderer);
+    SDL_RenderCopy(renderer, is->vid_texture, NULL, NULL);
+    SDL_RenderPresent(renderer);
 }
 /* this thread gets the stream from the disk or the network */
 static int read_thread(void* arg)
