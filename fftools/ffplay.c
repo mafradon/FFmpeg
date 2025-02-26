@@ -364,6 +364,7 @@ static SDL_RendererInfo renderer_info = {0};
 static SDL_AudioDeviceID audio_dev;
 
 static VkRenderer *vk_renderer;
+extern SDL_Texture* upload_texture_direct(AVFrame* frame);
 
 static const struct TextureFormatEntry {
     enum AVPixelFormat format;
@@ -970,9 +971,11 @@ static void video_image_display(VideoState* is)
     if (!vp || !vp->frame)
         return;
 
-    // If Vulkan renderer is available, use it for direct display
+    // If Vulkan renderer is available, ensure non-blocking display
     if (vk_renderer) {
-        vk_renderer_display(vk_renderer, vp->frame);
+        if (!vk_renderer_display(vk_renderer, vp->frame)) {
+            av_log(NULL, AV_LOG_WARNING, "vk_renderer_display encountered a blocking call.\\n");
+        }
         frame_queue_next(&is->pictq); // Dequeue the displayed frame
         return;
     }
@@ -1004,6 +1007,7 @@ static void video_image_display(VideoState* is)
     // Dequeue the displayed frame to avoid repeated rendering
     frame_queue_next(&is->pictq);
 }
+
 
 
 static inline int compute_mod(int a, int b)
@@ -2842,7 +2846,8 @@ static int read_thread(void* arg)
     return 0;
 }
 
-// Simplified display function (no synchronization)
+
+
 static void display_frame(AVFrame* frame) {
     SDL_Texture* texture = upload_texture_direct(frame);
     if (texture) {
