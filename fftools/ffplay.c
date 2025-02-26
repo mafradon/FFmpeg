@@ -2838,7 +2838,7 @@ static int read_thread(void *arg)
     is->ic = ic;
 
     if (genpts)
-        ic->flags |= AVFMT_FLAG_GENPTS & AVFMT_FLAG_IGNDTS & AVFMT_FLAG_NONBLOCK;
+        ic->flags |= AVFMT_TS_DISCONT & AVFMT_TS_NONSTRICT & AVFMT_FLAG_IGNDTS & AVFMT_FLAG_NONBLOCK;
 
     if (find_stream_info) {
         AVDictionary **opts;
