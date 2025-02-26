@@ -2739,7 +2739,15 @@ static int is_realtime(AVFormatContext *s)
         return 1;
     return 0;
 }
-
+static void display_frame(AVFrame* frame) {
+    SDL_Texture* texture = upload_texture_direct(frame);
+    if (texture) {
+        SDL_RenderClear(renderer);
+        SDL_RenderCopy(renderer, texture, NULL, NULL);
+        SDL_RenderPresent(renderer);
+        SDL_DestroyTexture(texture);
+    }
+}
 /* this thread gets the stream from the disk or the network */
 static int read_thread(void* arg)
 {
@@ -2845,19 +2853,6 @@ static int read_thread(void* arg)
 
     return 0;
 }
-
-
-
-static void display_frame(AVFrame* frame) {
-    SDL_Texture* texture = upload_texture_direct(frame);
-    if (texture) {
-        SDL_RenderClear(renderer);
-        SDL_RenderCopy(renderer, texture, NULL, NULL);
-        SDL_RenderPresent(renderer);
-        SDL_DestroyTexture(texture);
-    }
-}
-
 
 static VideoState *stream_open(const char *filename,
                                const AVInputFormat *iformat)
