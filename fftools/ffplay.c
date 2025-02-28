@@ -610,6 +610,8 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
                             }
                         }
                         break;
+                        av_log(NULL, AV_LOG_INFO, "Decoded frame: pts=%lld, format=%d, width=%d, height=%d\n",
+                            frame->pts, frame->format, frame->width, frame->height);
                 }
                 if (ret == AVERROR_EOF) {
                     d->finished = d->pkt_serial;
@@ -775,6 +777,7 @@ static Frame *frame_queue_peek_readable(FrameQueue *f)
 
 static void frame_queue_push(FrameQueue *f)
 {
+    av_log(NULL, AV_LOG_INFO, "Frame pushed to pictq\n");
     if (++f->windex == f->max_size)
         f->windex = 0;
     SDL_LockMutex(f->mutex);
@@ -908,6 +911,7 @@ static int upload_texture(SDL_Texture **tex, AVFrame *frame)
     int ret = 0;
     Uint32 sdl_pix_fmt;
     SDL_BlendMode sdl_blendmode;
+    av_log(NULL, AV_LOG_INFO, "Uploading texture: format=%d, width=%d, height=%d\n", frame->format, frame->width, frame->height);
     get_sdl_pix_fmt_and_blendmode(frame->format, &sdl_pix_fmt, &sdl_blendmode);
     if (realloc_texture(tex, sdl_pix_fmt == SDL_PIXELFORMAT_UNKNOWN ? SDL_PIXELFORMAT_ARGB8888 : sdl_pix_fmt, frame->width, frame->height, sdl_blendmode, 0) < 0)
         return -1;
@@ -960,8 +964,7 @@ static void set_sdl_yuv_conversion_mode(AVFrame *frame)
 #endif
 }
 
-static void video_image_display(VideoState* is)
-{
+static void video_image_display(VideoState* is) {
     Frame* vp;
     SDL_Rect rect;
 
@@ -973,39 +976,19 @@ static void video_image_display(VideoState* is)
     // If Vulkan renderer is available, ensure non-blocking display
     if (vk_renderer) {
         if (!vk_renderer_display(vk_renderer, vp->frame)) {
-            av_log(NULL, AV_LOG_WARNING, "vk_renderer_display encountered a blocking call.\\n");
+            av_log(NULL, AV_LOG_WARNING, "vk_renderer_display encountered a blocking call.\n");
         }
         frame_queue_next(&is->pictq); // Dequeue the displayed frame
         return;
     }
 
-    // Calculate display rectangle based on video dimensions
-    calculate_display_rect(&rect, is->xleft, is->ytop, is->width, is->height, vp->width, vp->height, vp->sar);
-
-    // Set the YUV conversion mode for SDL
-    set_sdl_yuv_conversion_mode(vp->frame);
-
-    // Upload the frame directly if not already uploaded
-    if (!vp->uploaded) {
-        if (upload_texture(&is->vid_texture, vp->frame) < 0) {
-            set_sdl_yuv_conversion_mode(NULL);
-            return;
-        }
-        vp->uploaded = 1;
-        vp->flip_v = vp->frame->linesize[0] < 0;
-    }
-
-    // Render the frame immediately without synchronization
-    SDL_RenderClear(renderer);
-    SDL_RenderCopyEx(renderer, is->vid_texture, NULL, &rect, 0, NULL, vp->flip_v ? SDL_FLIP_VERTICAL : 0);
-    SDL_RenderPresent(renderer);
-
-    // Reset YUV conversion mode after rendering
-    set_sdl_yuv_conversion_mode(NULL);
+    // Call display_frame without SDL_RenderPresent
+    display_frame(is, vp);
 
     // Dequeue the displayed frame to avoid repeated rendering
     frame_queue_next(&is->pictq);
 }
+
 
 
 
@@ -1327,17 +1310,19 @@ static int video_open(VideoState *is)
 }
 
 /* display the current picture, if any */
-static void video_display(VideoState *is)
-{
+static void video_display(VideoState* is) {
     if (!is->width)
         video_open(is);
 
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
+
     if (is->audio_st && is->show_mode != SHOW_MODE_VIDEO)
         video_audio_display(is);
     else if (is->video_st)
         video_image_display(is);
+
+    // Centralized rendering call here, as in original code
     SDL_RenderPresent(renderer);
 }
 
@@ -2738,14 +2723,32 @@ static int is_realtime(AVFormatContext *s)
         return 1;
     return 0;
 }
-static void display_frame(VideoState *is, AVFrame* frame) {
-    if (upload_texture(&is->vid_texture, frame) < 0) {
-        av_log(NULL, AV_LOG_ERROR, "Failed to upload texture\\n");
-        return;
+static void display_frame(VideoState* is, Frame* vp) {
+    SDL_Rect rect;
+
+    // Calculate display rectangle based on video dimensions
+    calculate_display_rect(&rect, is->xleft, is->ytop, is->width, is->height, vp->width, vp->height, vp->sar);
+
+    // Set the YUV conversion mode for SDL
+    set_sdl_yuv_conversion_mode(vp->frame);
+
+    // Upload the frame only if not already uploaded
+    if (!vp->uploaded) {
+        if (upload_texture(&is->vid_texture, vp->frame) < 0) {
+            av_log(NULL, AV_LOG_ERROR, "Failed to upload texture\n");
+            set_sdl_yuv_conversion_mode(NULL);
+            return;
+        }
+        vp->uploaded = 1;
+        vp->flip_v = vp->frame->linesize[0] < 0;
     }
+
+    // Render the frame
     SDL_RenderClear(renderer);
-    SDL_RenderCopy(renderer, is->vid_texture, NULL, NULL);
-    SDL_RenderPresent(renderer);
+    SDL_RenderCopyEx(renderer, is->vid_texture, NULL, &rect, 0, NULL, vp->flip_v ? SDL_FLIP_VERTICAL : 0);
+
+    // Reset YUV conversion mode after rendering
+    set_sdl_yuv_conversion_mode(NULL);
 }
 /* this thread gets the stream from the disk or the network */
 static int read_thread(void* arg)
@@ -2829,6 +2832,7 @@ static int read_thread(void* arg)
         }
 
         if (pkt->stream_index == is->video_stream) {
+            av_log(NULL, AV_LOG_INFO, "Packet received for stream %d, size: %d\n", pkt->stream_index, pkt->size);
             packet_queue_put(&is->videoq, pkt);  // Queue packet for decoding and instant display
 
             // Immediate decode and display (no PTS checks)
