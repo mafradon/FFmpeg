@@ -968,8 +968,8 @@ static void video_image_display(VideoState* is) {
     Frame* vp;
     SDL_Rect rect;
 
-    // Get and dequeue the next frame from the pictq for display
-    vp = frame_queue_peek(&is->pictq);
+    // Get the last displayed frame from the pictq
+    vp = frame_queue_peek_last(&is->pictq);
     if (!vp || !vp->frame)
         return;
 
@@ -978,15 +978,11 @@ static void video_image_display(VideoState* is) {
         if (!vk_renderer_display(vk_renderer, vp->frame)) {
             av_log(NULL, AV_LOG_WARNING, "vk_renderer_display encountered a blocking call.\n");
         }
-        frame_queue_next(&is->pictq); // Dequeue the displayed frame
-        return;
+        return; // No need to queue next frame here
     }
 
     // Call display_frame without SDL_RenderPresent
     display_frame(is, vp);
-
-    // Dequeue the displayed frame to avoid repeated rendering
-    frame_queue_next(&is->pictq);
 }
 
 
@@ -1319,10 +1315,14 @@ static void video_display(VideoState* is) {
 
     if (is->audio_st && is->show_mode != SHOW_MODE_VIDEO)
         video_audio_display(is);
-    else if (is->video_st)
+    else if (is->video_st) {
         video_image_display(is);
 
-    // Centralized rendering call here, as in original code
+        //  Move frame_queue_next() here to ensure it's only called after rendering
+        frame_queue_next(&is->pictq);
+    }
+
+    //  Centralized rendering call here, as in original code
     SDL_RenderPresent(renderer);
 }
 
