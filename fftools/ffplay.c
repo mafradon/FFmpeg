@@ -61,9 +61,9 @@
 const char program_name[] = "ffplay";
 const int program_birth_year = 2003;
 
-#define MAX_QUEUE_SIZE (32 * 1024 * 1024)
-#define MIN_FRAMES 2
-#define EXTERNAL_CLOCK_MIN_FRAMES 2
+#define MAX_QUEUE_SIZE (15 * 1024 * 1024)
+#define MIN_FRAMES 1
+#define EXTERNAL_CLOCK_MIN_FRAMES 1
 #define EXTERNAL_CLOCK_MAX_FRAMES 10
 
 /* Minimum SDL audio buffer size, in samples. */
@@ -75,21 +75,21 @@ const int program_birth_year = 2003;
 #define SDL_VOLUME_STEP (0.75)
 
 /* no AV sync correction is done if below the minimum AV sync threshold */
-#define AV_SYNC_THRESHOLD_MIN 0.04
+#define AV_SYNC_THRESHOLD_MIN 0.02
 /* AV sync correction is done if above the maximum AV sync threshold */
 #define AV_SYNC_THRESHOLD_MAX 0.1
 /* If a frame duration is longer than this, it will not be duplicated to compensate AV sync */
 #define AV_SYNC_FRAMEDUP_THRESHOLD 0.1
 /* no AV correction is done if too big error */
-#define AV_NOSYNC_THRESHOLD 10.0
+#define AV_NOSYNC_THRESHOLD 15.0
 
 /* maximum audio speed change to get correct sync */
 #define SAMPLE_CORRECTION_PERCENT_MAX 10
 
 /* external clock speed adjustment constants for realtime sources based on buffer fullness */
-#define EXTERNAL_CLOCK_SPEED_MIN  0.900
-#define EXTERNAL_CLOCK_SPEED_MAX  1.010
-#define EXTERNAL_CLOCK_SPEED_STEP 0.001
+#define EXTERNAL_CLOCK_SPEED_MIN  0.500
+#define EXTERNAL_CLOCK_SPEED_MAX  10.000
+#define EXTERNAL_CLOCK_SPEED_STEP 0.100
 
 /* we use about AUDIO_DIFF_AVG_NB A-V differences to make the average */
 #define AUDIO_DIFF_AVG_NB   20
@@ -1604,12 +1604,10 @@ static void update_video_pts(VideoState* is, double pts, int serial)
 }
 
 /* called to display each frame */
-static void video_refresh(void* opaque, double* remaining_time) {
+static void video_refresh(void* opaque, double* remaining_time)
+{
     VideoState* is = opaque;
     double time;
-    static double last_enqueue_time = 0;
-    static double frame_intervals[10] = { 0 }; // Store last 10 intervals
-    static int interval_index = 0;
 
     Frame* sp, * sp2;
 
@@ -1628,13 +1626,13 @@ static void video_refresh(void* opaque, double* remaining_time) {
     if (is->video_st) {
     retry:
         if (frame_queue_nb_remaining(&is->pictq) == 0) {
-            // No frames available, wait
+            // nothing to do, no picture to display in the queue
         }
         else {
             double last_duration, duration, delay;
             Frame* vp, * lastvp;
 
-            /* Dequeue the picture */
+            /* dequeue the picture */
             lastvp = frame_queue_peek_last(&is->pictq);
             vp = frame_queue_peek(&is->pictq);
 
@@ -1649,40 +1647,69 @@ static void video_refresh(void* opaque, double* remaining_time) {
             if (is->paused)
                 goto display;
 
-            /* Compute frame delay dynamically based on frame arrival time */
+            /* compute nominal last_duration */
+            last_duration = vp_duration(is, lastvp, vp);
+            delay = compute_target_delay(last_duration, is);
+
             time = av_gettime_relative() / 1000000.0;
-            if (last_enqueue_time > 0) {
-                double frame_interval = time - last_enqueue_time;
-                frame_intervals[interval_index] = frame_interval;
-                interval_index = (interval_index + 1) % 10; // Store last 10 intervals
-            }
-            last_enqueue_time = time;
-
-            // Compute the average frame interval
-            double total_time = 0;
-            int count = 0;
-            for (int i = 0; i < 10; i++) {
-                if (frame_intervals[i] > 0) {
-                    total_time += frame_intervals[i];
-                    count++;
-                }
-            }
-            double avg_frame_interval = (count > 0) ? (total_time / count) : 0.04; // Default 40ms
-
-            // Use the average frame interval as the delay
-            delay = avg_frame_interval;
-
             if (time < is->frame_timer + delay) {
                 *remaining_time = FFMIN(is->frame_timer + delay - time, *remaining_time);
                 goto display;
             }
 
             is->frame_timer += delay;
+            if (delay > 0 && time - is->frame_timer > AV_SYNC_THRESHOLD_MAX)
+                is->frame_timer = time;
 
             SDL_LockMutex(is->pictq.mutex);
             if (!isnan(vp->pts))
                 update_video_pts(is, vp->pts, vp->serial);
             SDL_UnlockMutex(is->pictq.mutex);
+
+            if (frame_queue_nb_remaining(&is->pictq) > 1) {
+                Frame* nextvp = frame_queue_peek_next(&is->pictq);
+                duration = vp_duration(is, vp, nextvp);
+                if (!is->step && (framedrop > 0 || (framedrop && get_master_sync_type(is) != AV_SYNC_VIDEO_MASTER)) && time > is->frame_timer + duration) {
+                    is->frame_drops_late++;
+                    frame_queue_next(&is->pictq);
+                    goto retry;
+                }
+            }
+
+            if (is->subtitle_st) {
+                while (frame_queue_nb_remaining(&is->subpq) > 0) {
+                    sp = frame_queue_peek(&is->subpq);
+
+                    if (frame_queue_nb_remaining(&is->subpq) > 1)
+                        sp2 = frame_queue_peek_next(&is->subpq);
+                    else
+                        sp2 = NULL;
+
+                    if (sp->serial != is->subtitleq.serial
+                        || (is->vidclk.pts > (sp->pts + ((float)sp->sub.end_display_time / 1000)))
+                        || (sp2 && is->vidclk.pts > (sp2->pts + ((float)sp2->sub.start_display_time / 1000))))
+                    {
+                        if (sp->uploaded) {
+                            int i;
+                            for (i = 0; i < sp->sub.num_rects; i++) {
+                                AVSubtitleRect* sub_rect = sp->sub.rects[i];
+                                uint8_t* pixels;
+                                int pitch, j;
+
+                                if (!SDL_LockTexture(is->sub_texture, (SDL_Rect*)sub_rect, (void**)&pixels, &pitch)) {
+                                    for (j = 0; j < sub_rect->h; j++, pixels += pitch)
+                                        memset(pixels, 0, sub_rect->w << 2);
+                                    SDL_UnlockTexture(is->sub_texture);
+                                }
+                            }
+                        }
+                        frame_queue_next(&is->subpq);
+                    }
+                    else {
+                        break;
+                    }
+                }
+            }
 
             frame_queue_next(&is->pictq);
             is->force_refresh = 1;
@@ -1691,11 +1718,59 @@ static void video_refresh(void* opaque, double* remaining_time) {
                 stream_toggle_pause(is);
         }
     display:
-        /* Display picture */
+        /* display picture */
         if (!display_disable && is->force_refresh && is->show_mode == SHOW_MODE_VIDEO && is->pictq.rindex_shown)
             video_display(is);
     }
     is->force_refresh = 0;
+    if (show_status) {
+        AVBPrint buf;
+        static int64_t last_time;
+        int64_t cur_time;
+        int aqsize, vqsize, sqsize;
+        double av_diff;
+
+        cur_time = av_gettime_relative();
+        if (!last_time || (cur_time - last_time) >= 30000) {
+            aqsize = 0;
+            vqsize = 0;
+            sqsize = 0;
+            if (is->audio_st)
+                aqsize = is->audioq.size;
+            if (is->video_st)
+                vqsize = is->videoq.size;
+            if (is->subtitle_st)
+                sqsize = is->subtitleq.size;
+            av_diff = 0;
+            if (is->audio_st && is->video_st)
+                av_diff = get_clock(&is->audclk) - get_clock(&is->vidclk);
+            else if (is->video_st)
+                av_diff = get_master_clock(is) - get_clock(&is->vidclk);
+            else if (is->audio_st)
+                av_diff = get_master_clock(is) - get_clock(&is->audclk);
+
+            av_bprint_init(&buf, 0, AV_BPRINT_SIZE_AUTOMATIC);
+            av_bprintf(&buf,
+                "%7.2f %s:%7.3f fd=%4d aq=%5dKB vq=%5dKB sq=%5dB \r",
+                get_master_clock(is),
+                (is->audio_st && is->video_st) ? "A-V" : (is->video_st ? "M-V" : (is->audio_st ? "M-A" : "   ")),
+                av_diff,
+                is->frame_drops_early + is->frame_drops_late,
+                aqsize / 1024,
+                vqsize / 1024,
+                sqsize);
+
+            if (show_status == 1 && AV_LOG_INFO > av_log_get_level())
+                fprintf(stderr, "%s", buf.str);
+            else
+                av_log(NULL, AV_LOG_INFO, "%s", buf.str);
+
+            fflush(stderr);
+            av_bprint_finalize(&buf, NULL);
+
+            last_time = cur_time;
+        }
+    }
 }
 
 static int queue_picture(VideoState* is, AVFrame* src_frame, double pts, double duration, int64_t pos, int serial)
@@ -2836,6 +2911,10 @@ static int read_thread(void* arg)
 
     if (genpts)
         ic->flags |= AVFMT_FLAG_GENPTS;
+    //extra flags
+    ic->flags |= AVFMT_TS_DISCONT;
+    ic->flags |= AVFMT_NOTIMESTAMPS;
+    ic->flags |= AVFMT_TS_NONSTRICT;
 
     if (find_stream_info) {
         AVDictionary** opts;
